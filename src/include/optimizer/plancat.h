@@ -24,9 +24,9 @@ typedef void (*get_relation_info_hook_type) (PlannerInfo *root,
 											 RelOptInfo *rel);
 extern PGDLLIMPORT get_relation_info_hook_type get_relation_info_hook;
 /* Hook for plugings to simulate partitioning*/
-typedef PartitionDesc (*RelationGetPartitionDesc_hook_type) (RelOptInfo *rel);
+typedef PartitionDesc (*RelationGetPartitionDesc_hook_type) (Oid relid);
 extern PGDLLIMPORT RelationGetPartitionDesc_hook_type RelationGetPartitionDesc_hook;
-typedef PartitionKey (*RelationGetPartitionKey_hook_type) (RelOptInfo *rel);
+typedef PartitionKey (*RelationGetPartitionKey_hook_type) (Oid relid);
 extern PGDLLIMPORT RelationGetPartitionKey_hook_type RelationGetPartitionKey_hook;
 typedef List *(*generate_partition_qual_hook_type) (RelOptInfo *rel);
 extern PGDLLIMPORT generate_partition_qual_hook_type generate_partition_qual_hook;

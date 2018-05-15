@@ -1912,8 +1912,8 @@ set_relation_partition_info(PlannerInfo *root, RelOptInfo *rel,
 
 	if (RelationGetPartitionDesc_hook && RelationGetPartitionKey_hook)
 	{
-		partdesc = (*RelationGetPartitionDesc_hook) (rel);
-		partkey = (*RelationGetPartitionKey_hook) (rel);
+		partdesc = (*RelationGetPartitionDesc_hook) (relation->rd_id);
+		partkey = (*RelationGetPartitionKey_hook) (relation->rd_id);
 	}
 
 	if (!partdesc || !partkey)
