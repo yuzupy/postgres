@@ -16,6 +16,7 @@
 
 #include "nodes/plannodes.h"
 #include "nodes/relation.h"
+#include "utils/rel.h"
 
 
 /*
@@ -51,6 +52,25 @@ typedef bool (*expand_inherited_rtentry_hook_type) (PlannerInfo *root,
 													RangeTblEntry *rte,
 													Index rti);
 extern PGDLLIMPORT expand_inherited_rtentry_hook_type expand_inherited_rtentry_hook;
+
+/* Hook for plugins to skip referring has_subclass */
+typedef bool (*skip_has_subclass_hook_type)(Oid parentrelID);
+extern PGDLLIMPORT skip_has_subclass_hook_type skip_has_subclass_hook;
+
+/* Hook for plugins to simulate partitioning */
+typedef List *(*find_all_inheritors_hook_type)(Oid parentrelID);
+extern PGDLLIMPORT find_all_inheritors_hook_type find_all_inheritors_hook;
+
+/* Hook for plugins to get control in expand_partitioned_rtentry() */
+typedef void (*expand_child_rtentry_hook_type)(PlannerInfo *root, RangeTblEntry *parentrte,
+											   Index parentRTindex, Relation parentrel,
+											   PlanRowMark *top_parentrc, List **appinfos,
+											   PartitionDesc partdesc);
+extern PGDLLIMPORT expand_child_rtentry_hook_type expand_child_rtentry_hook;
+
+/* Hook for plugins to get control in expand_single_inheritance_child() */
+typedef void (*build_child_rtentry_hook_type)(RangeTblEntry *childte, Oid parentOID, Oid childOID);
+extern PGDLLIMPORT build_child_rtentry_hook_type build_child_rtentry_hook;
 
 
 extern RelOptInfo *plan_set_operations(PlannerInfo *root);

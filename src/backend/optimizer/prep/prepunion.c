@@ -42,6 +42,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
@@ -52,8 +53,22 @@
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
 
+
 /* Hook for plugins to get control in expand_inherited_rtentry() */
 expand_inherited_rtentry_hook_type expand_inherited_rtentry_hook = NULL;
+
+/* Hook for plugins to skip referring has_subclass */
+skip_has_subclass_hook_type skip_has_subclass_hook = NULL;
+
+/* Hook for plugins to simulate partitioning */
+find_all_inheritors_hook_type find_all_inheritors_hook = NULL;
+
+/* Hook for plugins to get control in expand_partitioned_rtentry() */
+expand_child_rtentry_hook_type expand_child_rtentry_hook = NULL;
+
+/* Hook for plugins to get control in expand_single_inheritance_child() */
+build_child_rtentry_hook_type build_child_rtentry_hook = NULL;
+
 
 
 typedef struct
@@ -112,7 +127,7 @@ static void expand_single_inheritance_child(PlannerInfo *root,
 								RangeTblEntry *parentrte,
 								Index parentRTindex, Relation parentrel,
 								PlanRowMark *top_parentrc, Relation childrel,
-								List **appinfos, RangeTblEntry **childrte_p,
+								Oid childOID, List **appinfos, RangeTblEntry **childrte_p,
 								Index *childRTindex_p);
 static void make_inh_translation_list(Relation oldrelation,
 						  Relation newrelation,
@@ -1486,7 +1501,7 @@ expand_inherited_tables(PlannerInfo *root)
 
 		/* this is new hook point */
 		if(expand_inherited_rtentry_hook)
-			expansion = (*expand_inherited_rtentry_hook)(root, rte, rti);
+			expansion = (*expand_inherited_rtentry_hook) (root, rte, rti);
 		if(!expansion)
 			expand_inherited_rtentry(root, rte, rti);
 
@@ -1522,8 +1537,10 @@ expand_inherited_rtentry(PlannerInfo *root, RangeTblEntry *rte, Index rti)
 	PlanRowMark *oldrc;
 	Relation	oldrelation;
 	LOCKMODE	lockmode;
-	List	   *inhOIDs;
+	List	   *inhOIDs = NIL;
 	ListCell   *l;
+	PartitionDesc partdesc = NULL;
+	bool        is_hypo = false;
 
 	/* Does RT entry allow inheritance? */
 	if (!rte->inh)
@@ -1536,7 +1553,14 @@ expand_inherited_rtentry(PlannerInfo *root, RangeTblEntry *rte, Index rti)
 	}
 	/* Fast path for common case of childless table */
 	parentOID = rte->relid;
-	if (!has_subclass(parentOID))
+
+	if (skip_has_subclass_hook)
+	{
+		is_hypo = (*skip_has_subclass_hook) (parentOID);
+		if (is_hypo)
+			rte->relkind = RELKIND_PARTITIONED_TABLE;
+	}
+	if (!is_hypo && !has_subclass(parentOID))
 	{
 		/* Clear flag before returning */
 		rte->inh = false;
@@ -1564,8 +1588,13 @@ expand_inherited_rtentry(PlannerInfo *root, RangeTblEntry *rte, Index rti)
 	else
 		lockmode = AccessShareLock;
 
+
 	/* Scan for all members of inheritance set, acquire needed locks */
-	inhOIDs = find_all_inheritors(parentOID, lockmode, NULL);
+	if (find_all_inheritors_hook)
+		inhOIDs = (*find_all_inheritors_hook) (parentOID);
+
+	if (!inhOIDs)
+		inhOIDs = find_all_inheritors(parentOID, lockmode, NULL);
 
 	/*
 	 * Check that there's at least one descendant, else treat as no-child
@@ -1594,7 +1623,12 @@ expand_inherited_rtentry(PlannerInfo *root, RangeTblEntry *rte, Index rti)
 	oldrelation = heap_open(parentOID, NoLock);
 
 	/* Scan the inheritance set and expand it */
-	if (RelationGetPartitionDesc(oldrelation) != NULL)
+	if (RelationGetPartitionDesc_hook)
+		partdesc = (*RelationGetPartitionDesc_hook) (oldrelation->rd_id);
+	if (!partdesc)
+		partdesc = RelationGetPartitionDesc(oldrelation);
+
+	if (partdesc != NULL)
 	{
 		Assert(rte->relkind == RELKIND_PARTITIONED_TABLE);
 
@@ -1641,7 +1675,7 @@ expand_inherited_rtentry(PlannerInfo *root, RangeTblEntry *rte, Index rti)
 			}
 
 			expand_single_inheritance_child(root, rte, rti, oldrelation, oldrc,
-											newrelation,
+											newrelation, childOID,
 											&appinfos, &childrte,
 											&childRTindex);
 
@@ -1685,7 +1719,16 @@ expand_partitioned_rtentry(PlannerInfo *root, RangeTblEntry *parentrte,
 	RangeTblEntry *childrte;
 	Index		childRTindex;
 	bool		has_child = false;
-	PartitionDesc partdesc = RelationGetPartitionDesc(parentrel);
+	PartitionDesc partdesc = NULL;
+	bool        is_hypopart = true;
+
+	if (RelationGetPartitionDesc_hook)
+		partdesc = (*RelationGetPartitionDesc_hook) (parentrel->rd_id);
+	if (!partdesc)
+	{
+		partdesc = RelationGetPartitionDesc(parentrel);
+		is_hypopart = false;
+	}
 
 	check_stack_depth();
 
@@ -1707,48 +1750,54 @@ expand_partitioned_rtentry(PlannerInfo *root, RangeTblEntry *parentrte,
 
 	/* First expand the partitioned table itself. */
 	expand_single_inheritance_child(root, parentrte, parentRTindex, parentrel,
-									top_parentrc, parentrel,
+									top_parentrc, parentrel, parentrte->relid,
 									appinfos, &childrte, &childRTindex);
 
-	for (i = 0; i < partdesc->nparts; i++)
+	if (expand_child_rtentry_hook && is_hypopart)
+		(*expand_child_rtentry_hook) (root, parentrte, parentRTindex,
+									  parentrel, top_parentrc, appinfos, partdesc);
+	else
 	{
-		Oid			childOID = partdesc->oids[i];
-		Relation	childrel;
-
-		/* Open rel; we already have required locks */
-		childrel = heap_open(childOID, NoLock);
-
-		/* As in expand_inherited_rtentry, skip non-local temp tables */
-		if (RELATION_IS_OTHER_TEMP(childrel))
+		for (i = 0; i < partdesc->nparts; i++)
 		{
-			heap_close(childrel, lockmode);
-			continue;
+			Oid			childOID = partdesc->oids[i];
+			Relation	childrel;
+
+			/* Open rel; we already have required locks */
+			childrel = heap_open(childOID, NoLock);
+
+			/* As in expand_inherited_rtentry, skip non-local temp tables */
+			if (RELATION_IS_OTHER_TEMP(childrel))
+			{
+				heap_close(childrel, lockmode);
+				continue;
+			}
+
+			/* We have a real partition. */
+			has_child = true;
+
+			expand_single_inheritance_child(root, parentrte, parentRTindex,
+											parentrel, top_parentrc, childrel, childOID,
+											appinfos, &childrte, &childRTindex);
+
+			/* If this child is itself partitioned, recurse */
+			if (childrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+				expand_partitioned_rtentry(root, childrte, childRTindex,
+										   childrel, top_parentrc, lockmode,
+										   appinfos);
+
+			/* Close child relation, but keep locks */
+			heap_close(childrel, NoLock);
 		}
 
-		/* We have a real partition. */
-		has_child = true;
-
-		expand_single_inheritance_child(root, parentrte, parentRTindex,
-										parentrel, top_parentrc, childrel,
-										appinfos, &childrte, &childRTindex);
-
-		/* If this child is itself partitioned, recurse */
-		if (childrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-			expand_partitioned_rtentry(root, childrte, childRTindex,
-									   childrel, top_parentrc, lockmode,
-									   appinfos);
-
-		/* Close child relation, but keep locks */
-		heap_close(childrel, NoLock);
+		/*
+		 * If the partitioned table has no partitions or all the partitions are
+		 * temporary tables from other backends, treat this as non-inheritance
+		 * case.
+		 */
+		if (!has_child)
+			parentrte->inh = false;
 	}
-
-	/*
-	 * If the partitioned table has no partitions or all the partitions are
-	 * temporary tables from other backends, treat this as non-inheritance
-	 * case.
-	 */
-	if (!has_child)
-		parentrte->inh = false;
 }
 
 /*
@@ -1776,12 +1825,11 @@ static void
 expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 								Index parentRTindex, Relation parentrel,
 								PlanRowMark *top_parentrc, Relation childrel,
-								List **appinfos, RangeTblEntry **childrte_p,
-								Index *childRTindex_p)
+								Oid childOID, List **appinfos,
+								RangeTblEntry **childrte_p, Index *childRTindex_p)
 {
 	Query	   *parse = root->parse;
 	Oid			parentOID = RelationGetRelid(parentrel);
-	Oid			childOID = RelationGetRelid(childrel);
 	RangeTblEntry *childrte;
 	Index		childRTindex;
 	AppendRelInfo *appinfo;
@@ -1810,9 +1858,14 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 		childrte->inh = false;
 	childrte->requiredPerms = 0;
 	childrte->securityQuals = NIL;
+
+	if (build_child_rtentry_hook)
+		(*build_child_rtentry_hook) (childrte, parentOID, childOID);
+
 	parse->rtable = lappend(parse->rtable, childrte);
 	childRTindex = list_length(parse->rtable);
 	*childRTindex_p = childRTindex;
+
 
 	/*
 	 * We need an AppendRelInfo if paths will be built for the child RTE. If
