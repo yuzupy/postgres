@@ -117,6 +117,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	Relation	relation;
 	bool		hasindex;
 	List	   *indexinfos = NIL;
+	RangeTblEntry  *rte = planner_rt_fetch(varno, root);
 
 	/*
 	 * We need not lock the relation since it was already locked, either by
@@ -453,7 +454,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	 * Collect info about relation's partitioning scheme, if any. Only
 	 * inheritance parents may be partitioned.
 	 */
-	if (inhparent && relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	if (inhparent && rte->relkind == RELKIND_PARTITIONED_TABLE)
 		set_relation_partition_info(root, rel, relation);
 
 	heap_close(relation, NoLock);
